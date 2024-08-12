@@ -1,0 +1,720 @@
+---
+title: "EDA_UDS"
+author: "Aubree Krager"
+date: "2024-03-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setup,include=FALSE,results=FALSE,warning=FALSE,message=FALSE}
+knitr::opts_chunk$set(echo = TRUE, results = 'hold')
+#Load Libraries and functions Dr. Abdoli made
+library(magrittr)
+library(dplyr)
+library(tidyr)
+library(tidyselect)
+library(kableExtra)
+library(NACCdata)
+library(glmnet)
+library(car)
+library(tibble)
+library(ggmosaic)
+library(ROCit)
+library(pROC)
+library(caret)
+library()
+
+colTrim <- function(x, width){
+  x <- trimws(x)
+  sapply(x, strtrim, width=width)
+}
+source('describeDS.R')
+source('briefSummary.R')
+source('xval.R')
+```
+
+### Get Data:  
+These are the variables that will be used in the model. The order of variables are chosen for convenience of comparing coefficients; the order should not significantly affect the overall results.
+
+```{r}
+col2clean <- c('NACCID', 'NACCALZD', 'NACCAGE', 'BPDIAS', 'BPSYS',
+               'HXHYPER','HYPERCHO', 'HXSTROKE','CVHATT', 'CVCHF',
+               'CVAFIB','NACCBMI', 'DIABETES', 'B12DEF', 'DEP2YRS', 
+               'SMOKYRS', 'TOBAC100', 'PACKSPER', 'ALCOHOL', 
+               'NACCNIHR', 'HISPANIC','EDUC', 'SEX', 'MARISTAT',
+               'NACCVNUM', 'NACCNIHR_updated')
+cat(sprintf('{%s}', paste(col2clean, collapse = ', ')), sep='\n')
+```
+
+### Variable Specification
+The variable cleaning specifications are shown below:
+
+```{r}
+#reading the cleaning instructions
+glmDS0 <- read.csv('cleanUDS_EDA.csv')
+
+#making table
+glmDS0 %>% dplyr::select(-c(Rename, Comment, MissingValComment)) %>% 
+  dplyr::filter(GLM!="", Name %in% col2clean) %>% 
+  mutate(CurrentVal=colTrim(CurrentVal, 20)) %>% 
+  mutate(NewLevel=colTrim(NewLevel, 20)) %>% 
+  kbl(caption = 'UDS Variables for the Study') %>% 
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("striped", "hover", "condensed",
+                                      "responsive")) %>% 
+  column_spec(2, width_max = '2in') %>% 
+  column_spec(3, width_max = '2in') %>% 
+  scroll_box(height = "400px")
+```
+
+# Create the data frame
+```{r}
+#make data frame
+X <- NACCdata::cleanDS(
+  cleanDF = glmDS0 %>% filter(GLM!="", Name %in% col2clean)
+    ) 
+
+#checking race statements
+#how many people are multiracial and Hispanic
+nrow(X %>% 
+  filter(NACCNIHR == "Multiracial" & HISPANIC == "Hispanic"))
+#how many people are any race and hispanic? 
+nrow(X %>% 
+  filter(NACCNIHR != "" & HISPANIC == "Hispanic"))
+#how many people have a NA race value and are non hispanic
+nrow(X %>% 
+  filter(is.na(NACCNIHR) & HISPANIC == "non-Hispanic"))
+#how many people  have a NA race value and are hispanic
+nrow(X %>% 
+  filter(is.na(NACCNIHR) & HISPANIC == "Hispanic"))
+
+#make updated race variable
+X <- X %>% 
+  mutate(NACCNIHR_updated = case_when(
+    NACCNIHR != "" & HISPANIC == "Hispanic" ~ "Multiracial",
+    is.na(NACCNIHR) & HISPANIC == "non-Hispanic" ~ "Other",
+    is.na(NACCNIHR) & HISPANIC == "Hispanic" ~ "Hispanic",
+    TRUE ~ NACCNIHR
+  ))
+
+#checking to see if correct
+table(X$NACCNIHR_updated)
+
+
+#set reference category
+X$NACCNIHR_updated <- relevel(factor(X$NACCNIHR_updated), ref = "White")
+
+#how many records
+X <- X %>% filter(NACCVNUM==1)
+cat(sprintf('%d records is read.\n', dim(X)[1]))
+```
+
+## Incomplete Cases {.tabset}
+The incomplete cases are dropped and the counts of NA's before and after are reported. Then, variables are summarized in a brief format more appropriate for publications. 
+
+### Counting NAs
+```{r}
+cat('Before removing incomplete observations:\n\n')
+(naCounts <- sapply(colnames(X), \(v) sum(is.na(X[[v]]))))
+
+X <- X %>% 
+  drop_na(ALCOHOL) %>% 
+  drop_na(EDUC) %>% 
+  drop_na(MARISTAT) %>% 
+  drop_na(NACCBMI) %>% 
+  drop_na(PACKSPER) %>% 
+  drop_na(B12DEF) %>% 
+  drop_na(BPDIAS) %>% 
+  drop_na(BPSYS) %>% 
+  drop_na(CVAFIB) %>% 
+  drop_na(CVCHF) %>% 
+  drop_na(CVHATT) %>% 
+  drop_na(DEP2YRS) %>% 
+  drop_na(DIABETES) %>% 
+  drop_na(HXHYPER) %>% 
+  drop_na(HXSTROKE) %>% 
+  drop_na(HYPERCHO) %>% 
+  drop_na(NACCNIHR_updated)
+
+cat('\n\n\nAfter removing incomplete observations:\n\n')
+sapply(colnames(X), \(v) sum(is.na(X[[v]])))
+
+```
+
+## Only AD and Normal Cognition
+```{r}
+X18 <- X %>% mutate(NACCALZD=factor(NACCALZD, c("Normal", "Alzheimer"))) %>%
+  filter(!is.na(NACCALZD))
+
+nrow(X18)
+```
+
+## Single Numeric Variables
+
+# Boxplot of Age by Diagnosis
+```{r}
+  ggplot(data = X18, aes(x = NACCALZD, y = NACCAGE)) +
+  geom_boxplot(fill = "#009E73") +
+  labs(title = "Age by Diagnosis", 
+       y = "Age (yr)",
+       x = "Diagnosis") +
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Boxplot of Years of Education by Diagnosis
+```{r}
+  ggplot(data = X18, aes(x = NACCALZD, y = EDUC)) +
+  geom_boxplot(fill = "#009E73") +
+  labs(title = "Years of Education by Diagnosis", 
+       y = "Years of Education",
+       x = "Diagnosis") +
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Boxplot of BMI by Diagnosis
+```{r}
+  ggplot(data = X18, aes(x = NACCALZD, y = NACCBMI)) +
+  geom_boxplot(fill = "#009E73") +
+  labs(title = "BMI by Diagnosis", 
+       y = "Body Mass Index (BMI)",
+       x = "Diagnosis") +
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Boxplot of Diastolic Blood Pressure by Diagnosis
+```{r}
+  ggplot(data = X18, aes(x = NACCALZD, y = BPDIAS)) +
+  geom_boxplot(fill = "#009E73") +
+  labs(title = "Diastolic Blood Pressure by Diagnosis", 
+       y = "Diastolic Blood Pressure",
+       x = "Diagnosis") +
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Boxplot of Systolic Blood Pressure by Diagnosis
+```{r}
+  ggplot(data = X18, aes(x = NACCALZD, y = BPSYS)) +
+  geom_boxplot(fill = "#009E73") +
+  labs(title = "Systolic Blood Pressure by Diagnosis", 
+       y = "Systolic Blood Pressure",
+       x = "Diagnosis") +
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+## Two Numerical Variables (Age vs. Variable)
+
+Note, these EDA groaphs are for a patients first visit and only considers patients with normal cognition and AD. 
+
+# Scatter plot of Age and Years of Education by Diagnosis
+```{r}
+  ggplot(data = X18, aes(x = NACCAGE, y = EDUC, color = NACCALZD)) +
+  geom_point() +
+  labs(title = "Age and Years of Education by Diagnosis", 
+       y = "Years of Education",
+       x = "Age (yr)", color = "Diagnosis") +
+  geom_smooth(method = "lm", se = FALSE) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))+
+  scale_color_manual(values = c("#edcb69", "#385a93"))
+```
+
+# Scatter plot of Age and BMI by Diagnosis
+```{r}
+  ggplot(data = X18, aes(x = NACCAGE, y = NACCBMI, color = NACCALZD)) +
+  geom_point() +
+  labs(title = "Age and BMI by Diagnosis", 
+       y = "Body Mass Index (BMI)",
+       x = "Age (yr)", color = "Diagnosis") +
+  geom_smooth(method = "lm", se = FALSE) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))+
+  scale_color_manual(values = c("#edcb69", "#385a93"))
+```
+
+# Scatter plot of Age and Diastolic Blood Pressure by Diagnosis
+```{r}
+  ggplot(data = X18, aes(x = NACCAGE, y = BPDIAS, color = NACCALZD)) +
+  geom_point() +
+  labs(title = "Age and Diastolic Blood Pressure by Diagnosis", 
+       y = "Diastolic Blood Pressure",
+       x = "Age (yr)", color = "Diagnosis") +
+  geom_smooth(method = "lm", se = FALSE) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))+
+  scale_color_manual(values = c("#edcb69", "#385a93"))
+```
+
+# Scatter plot of Age and Systolic Blood Pressure by Diagnosis
+```{r}
+  ggplot(data = X18, aes(x = NACCAGE, y = BPSYS, color = NACCALZD)) +
+  geom_point() +
+  labs(title = "Age and Systolic Blood Pressure by Diagnosis", 
+       y = "Systolic Blood Pressure",
+       x = "Age (yr)", color = "Diagnosis") +
+  geom_smooth(method = "lm", se = FALSE) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))+
+  scale_color_manual(values = c("#edcb69", "#385a93"))
+```
+
+# Categorical Variables
+
+# Mosaic Plot of Alcohol Abuse and Diagnosis
+```{r}
+# Calculate the proportion table
+alcohol.prop <- prop.table(table(X18$NACCALZD, X18$ALCOHOL), margin = 1)
+
+# Convert the proportion table to a data frame
+alcohol.prop_df <- as.data.frame(alcohol.prop)
+
+# Rename the columns for clarity
+colnames(alcohol.prop_df) <- c("Diagnosis", "Alcohol", "Proportion")
+
+print(alcohol.prop_df)
+
+ggplot(alcohol.prop_df, aes(x = Alcohol, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("Alcohol") +
+  ylab("Diagnosis") +
+  ggtitle("Alcohol Abuse by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Mosaic Plot of Marital Status and Diagnosis
+
+```{r}
+# Calculate the proportion table
+MARISTAT.prop <- prop.table(table(X18$NACCALZD, X18$MARISTAT), margin = 1)
+
+# Convert the proportion table to a data frame
+MARISTAT.prop_df <- as.data.frame(MARISTAT.prop)
+
+# Rename the columns for clarity
+colnames(MARISTAT.prop_df) <- c("Diagnosis", "MARISTAT", "Proportion")
+
+print(MARISTAT.prop_df)
+
+ggplot(MARISTAT.prop_df, aes(x = MARISTAT, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("Marital Status") +
+  ylab("Diagnosis") +
+  ggtitle("Marital Status by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Mosaic Plot of Average Number of Cigarette Packs Smoked per Day and Diagnosis
+
+```{r}
+# Calculate the proportion table
+PACKSPER.prop <- prop.table(table(X18$NACCALZD, X18$PACKSPER), margin = 1)
+
+# Convert the proportion table to a data frame
+PACKSPER.prop_df <- as.data.frame(PACKSPER.prop)
+
+# Rename the columns for clarity
+colnames(PACKSPER.prop_df) <- c("Diagnosis", "PACKSPER", "Proportion")
+
+print(PACKSPER.prop_df)
+
+ggplot(PACKSPER.prop_df, aes(x = PACKSPER, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab(" Average Number of Cigarette Packs Smoked per Day") +
+  ylab("Diagnosis") +
+  ggtitle("Average Number of Cigarette Packs Smoked per Day by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Mosaic Plot of B12 Deficency and Diagnosis
+```{r}
+# Calculate the proportion table
+B12DEF.prop <- prop.table(table(X18$NACCALZD, X18$B12DEF), margin = 1)
+
+# Convert the proportion table to a data frame
+B12DEF.prop_df <- as.data.frame(B12DEF.prop)
+
+# Rename the columns for clarity
+colnames(B12DEF.prop_df) <- c("Diagnosis", "B12DEF", "Proportion")
+
+print(B12DEF.prop_df)
+
+ggplot(B12DEF.prop_df, aes(x = B12DEF, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("B12 Deficency") +
+  ylab("Diagnosis") +
+  ggtitle("B12 Deficency by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Mosaic Plot of Atrial Fibrillation and Diagnosis
+```{r}
+# Calculate the proportion table
+CVAFIB.prop <- prop.table(table(X18$NACCALZD, X18$CVAFIB), margin = 1)
+
+# Convert the proportion table to a data frame
+CVAFIB.prop_df <- as.data.frame(CVAFIB.prop)
+
+# Rename the columns for clarity
+colnames(CVAFIB.prop_df) <- c("Diagnosis", "CVAFIB", "Proportion")
+
+print(CVAFIB.prop_df)
+
+ggplot(CVAFIB.prop_df, aes(x = CVAFIB, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("Atrial Fibrillation") +
+  ylab("Diagnosis") +
+  ggtitle("Atrial Fibrillation by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Mosaic Plot of Congesive Heart Failure and Diagnosis
+```{r}
+# Calculate the proportion table
+CVCHF.prop <- prop.table(table(X18$NACCALZD, X18$CVCHF), margin = 1)
+
+# Convert the proportion table to a data frame
+CVCHF.prop_df <- as.data.frame(CVCHF.prop)
+
+# Rename the columns for clarity
+colnames(CVCHF.prop_df) <- c("Diagnosis", "CVCHF", "Proportion")
+
+print(CVCHF.prop_df)
+
+ggplot(CVCHF.prop_df, aes(x = CVCHF, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("Congesive Heart Failure") +
+  ylab("Diagnosis") +
+  ggtitle("Congesive Heart Failure by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+  
+# Mosaic Plot of Heart Attack/Cardiac Arrest and Diagnosis
+```{r}
+# Calculate the proportion table
+CVHATT.prop <- prop.table(table(X18$NACCALZD, X18$CVHATT), margin = 1)
+
+# Convert the proportion table to a data frame
+CVHATT.prop_df <- as.data.frame(CVHATT.prop)
+
+# Rename the columns for clarity
+colnames(CVHATT.prop_df) <- c("Diagnosis", "CVHATT", "Proportion")
+
+print(CVHATT.prop_df)
+
+ggplot(CVHATT.prop_df, aes(x = CVHATT, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("Heart Attack/Cardiac Arrest") +
+  ylab("Diagnosis") +
+  ggtitle("Heart Attack/Cardiac Arrest by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Mosaic Plot of Depression and Diagnosis
+```{r}
+# Calculate the proportion table
+DEP2YRS.prop <- prop.table(table(X18$NACCALZD, X18$DEP2YRS), margin = 1)
+
+# Convert the proportion table to a data frame
+DEP2YRS.prop_df <- as.data.frame(DEP2YRS.prop)
+
+# Rename the columns for clarity
+colnames(DEP2YRS.prop_df) <- c("Diagnosis", "DEP2YRS", "Proportion")
+
+print(DEP2YRS.prop_df)
+
+ggplot(DEP2YRS.prop_df, aes(x = DEP2YRS, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("Depression") +
+  ylab("Diagnosis") +
+  ggtitle("Depression by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+  
+# Mosaic Plot of Diabetes and Diagnosis
+```{r}
+# Calculate the proportion table
+DIABETES.prop <- prop.table(table(X18$NACCALZD, X18$DIABETES), margin = 1)
+
+# Convert the proportion table to a data frame
+DIABETES.prop_df <- as.data.frame(DIABETES.prop)
+
+# Rename the columns for clarity
+colnames(DIABETES.prop_df) <- c("Diagnosis", "DIABETES", "Proportion")
+
+print(DIABETES.prop_df)
+
+ggplot(DIABETES.prop_df, aes(x = DIABETES, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("Diabetes") +
+  ylab("Diagnosis") +
+  ggtitle("Diabetes by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+  
+# Mosaic Plot of Hypertension and Diagnosis
+```{r}
+# Calculate the proportion table
+HXHYPER.prop <- prop.table(table(X18$NACCALZD, X18$HXHYPER), margin = 1)
+
+# Convert the proportion table to a data frame
+HXHYPER.prop_df <- as.data.frame(HXHYPER.prop)
+
+# Rename the columns for clarity
+colnames(HXHYPER.prop_df) <- c("Diagnosis", "HXHYPER", "Proportion")
+
+print(HXHYPER.prop_df)
+
+ggplot(HXHYPER.prop_df, aes(x = HXHYPER, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("Hypertension") +
+  ylab("Diagnosis") +
+  ggtitle("Hypertension by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Mosaic Plot of Stroke and Diagnosis
+```{r}
+# Calculate the proportion table
+HXSTROKE.prop <- prop.table(table(X18$NACCALZD, X18$HXSTROKE), margin = 1)
+
+# Convert the proportion table to a data frame
+HXSTROKE.prop_df <- as.data.frame(HXSTROKE.prop)
+
+# Rename the columns for clarity
+colnames(HXSTROKE.prop_df) <- c("Diagnosis", "HXSTROKE", "Proportion")
+
+print(HXSTROKE.prop_df)
+
+ggplot(HXSTROKE.prop_df, aes(x = HXSTROKE, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("Stroke") +
+  ylab("Diagnosis") +
+  ggtitle("Stroke by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Mosaic Plot of Hypercholesterolemia and Diagnosis
+```{r}
+# Calculate the proportion table
+HYPERCHO.prop <- prop.table(table(X18$NACCALZD, X18$HYPERCHO), margin = 1)
+
+# Convert the proportion table to a data frame
+HYPERCHO.prop_df <- as.data.frame(HYPERCHO.prop)
+
+# Rename the columns for clarity
+colnames(HYPERCHO.prop_df) <- c("Diagnosis", "HYPERCHO", "Proportion")
+
+print(HYPERCHO.prop_df)
+
+ggplot(HYPERCHO.prop_df, aes(x = HYPERCHO, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("Hypercholesterolemia") +
+  ylab("Diagnosis") +
+  ggtitle("Hypercholesterolemia by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+  
+# Mosaic Plot of Race and Diagnosis
+```{r}
+# Calculate the proportion table
+NACCNIHR_updated.prop <- prop.table(table(X18$NACCALZD, X18$NACCNIHR_updated), margin = 1)
+
+# Convert the proportion table to a data frame
+NACCNIHR_updated.prop_df <- as.data.frame(NACCNIHR_updated.prop)
+
+# Rename the columns for clarity
+colnames(NACCNIHR_updated.prop_df) <- c("Diagnosis", "NACCNIHR_updated", "Proportion")
+
+print(NACCNIHR_updated.prop_df)
+
+ggplot(NACCNIHR_updated.prop_df, aes(x = NACCNIHR_updated, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("Race") +
+  ylab("Diagnosis") +
+  ggtitle("Race by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Mosaic Plot of Sex and Diagnosis
+```{r}
+# Calculate the proportion table
+SEX.prop <- prop.table(table(X18$NACCALZD, X18$SEX), margin = 1)
+
+# Convert the proportion table to a data frame
+SEX.prop_df <- as.data.frame(SEX.prop)
+
+# Rename the columns for clarity
+colnames(SEX.prop_df) <- c("Diagnosis", "SEX", "Proportion")
+
+print(SEX.prop_df)
+
+ggplot(SEX.prop_df, aes(x = SEX, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("Sex") +
+  ylab("Diagnosis") +
+  ggtitle("Sex by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
+
+# Mosaic Plot of Hispanic and Diagnosis
+```{r}
+# Calculate the proportion table
+HISPANIC.prop <- prop.table(table(X18$NACCALZD, X18$HISPANIC), margin = 1)
+
+# Convert the proportion table to a data frame
+HISPANIC.prop_df <- as.data.frame(HISPANIC.prop)
+
+# Rename the columns for clarity
+colnames(HISPANIC.prop_df) <- c("Diagnosis", "HISPANIC", "Proportion")
+
+print(HISPANIC.prop_df)
+
+ggplot(HISPANIC.prop_df, aes(x = HISPANIC, y = Diagnosis, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")),
+            color = "black",
+            size = 3,
+            fontface = "bold",
+            vjust = 0.5) +
+  scale_fill_gradient(low = "#009E73", high = "#385a93", name = "Proportion") +
+  xlab("Hispanic") +
+  ylab("Diagnosis") +
+  ggtitle("Hispanic by Diagnosis") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1)) + 
+  theme(text = element_text(size = 14), panel.background = element_rect(fill = "#f5f0ec"), rect = element_rect(fill = "#f5f0ec", colour = "white",
+                      size = 0.5, linetype = 1))
+```
